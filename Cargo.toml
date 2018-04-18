@@ -12,11 +12,16 @@ description = "The rust language implementation of Raft algorithm."
 categories = ["algorithms", "database-implementations"]
 
 [dependencies]
-log = "0.4.1"
+slog = "2.2"
+slog-async = "2.3.0"
+slog-stdlog = "3.0.2"
 protobuf = "1.2"
 quick-error = "1.2.1"
 rand = "0.4"
 fxhash = "0.2.1"
+
+[dev-dependencies]
+slog-term = "2.4.0"
 
 [badges]
 travis-ci = { repository = "pingcap/raft-rs" }

@@ -27,6 +27,7 @@
 
 use std::mem;
 
+use slog::Logger;
 use protobuf::{self, RepeatedField};
 use eraftpb::{ConfChange, ConfChangeType, ConfState, Entry, EntryType, HardState, Message,
               MessageType, Snapshot};
@@ -171,9 +172,10 @@ pub struct RawNode<T: Storage> {
 
 impl<T: Storage> RawNode<T> {
     // NewRawNode returns a new RawNode given configuration and a list of raft peers.
-    pub fn new(config: &Config, store: T, mut peers: Vec<Peer>) -> Result<RawNode<T>> {
+    pub fn new<L>(config: &Config, store: T, logger: L, mut peers: Vec<Peer>) -> Result<RawNode<T>>
+    where L: Into<Option<Logger>> {
         assert_ne!(config.id, 0, "config.id must not be zero");
-        let r = Raft::new(config, store);
+        let r = Raft::new(config, store, logger);
         let mut rn = RawNode {
             raft: r,
             prev_hs: Default::default(),

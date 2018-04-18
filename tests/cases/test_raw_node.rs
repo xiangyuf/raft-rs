@@ -27,6 +27,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use slog;
 use raft::eraftpb::*;
 use protobuf::{self, ProtobufEnum};
 use raft::*;
@@ -87,6 +88,7 @@ fn new_raw_node(
     RawNode::new(
         &new_test_config(id, peers, election, heartbeat),
         storage,
+        slog::Logger::root(slog::Discard, o!()),
         peer_nodes,
     ).unwrap()
 }
@@ -393,7 +395,6 @@ fn test_raw_node_start() {
     let store = new_storage();
     let mut raw_node = new_raw_node(1, vec![], 10, 1, store.clone(), vec![new_peer(1)]);
     let rd = raw_node.ready();
-    info!("rd {:?}", &rd);
     assert_eq!(rd, wants[0]);
     store.wl().append(&rd.entries).expect("");
     raw_node.advance(rd);

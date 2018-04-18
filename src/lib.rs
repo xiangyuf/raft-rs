@@ -31,7 +31,9 @@
 
 extern crate fxhash;
 #[macro_use]
-extern crate log;
+extern crate slog;
+extern crate slog_async;
+extern crate slog_stdlog;
 extern crate protobuf;
 #[macro_use]
 extern crate quick_error;

@@ -16,7 +16,7 @@
 #![cfg_attr(not(feature = "dev"), allow(unknown_lints))]
 
 #[macro_use]
-extern crate log;
+extern crate slog;
 extern crate protobuf;
 extern crate raft;
 extern crate rand;

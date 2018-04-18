@@ -35,6 +35,7 @@ use protobuf::{self, RepeatedField};
 use raft::eraftpb::{ConfChange, ConfChangeType, ConfState, Entry, EntryType, HardState, Message,
                     MessageType, Snapshot};
 use rand;
+use slog;
 
 use raft::*;
 use raft::storage::MemStorage;
@@ -91,6 +92,7 @@ pub fn new_test_raft(
     Interface::new(Raft::new(
         &new_test_config(id, peers, election, heartbeat),
         storage,
+        slog::Logger::root(slog::Discard, o!()),
     ))
 }
 
@@ -108,7 +110,7 @@ pub fn new_test_raft_with_prevote(
 }
 
 pub fn new_test_raft_with_config(config: &Config, storage: MemStorage) -> Interface {
-    Interface::new(Raft::new(config, storage))
+    Interface::new(Raft::new(config, storage, slog::Logger::root(slog::Discard, o!())))
 }
 
 fn read_messages<T: Storage>(raft: &mut Raft<T>) -> Vec<Message> {
@@ -290,7 +292,7 @@ fn new_raft_log(ents: &[Entry], offset: u64, committed: u64) -> RaftLog<MemStora
 }
 
 fn new_raft_log_with_storage(s: MemStorage) -> RaftLog<MemStorage> {
-    RaftLog::new(s, String::from(""))
+    RaftLog::new(s, String::from(""), slog::Logger::root(slog::Discard, o!()))
 }
 
 pub fn new_snapshot(index: u64, term: u64, nodes: Vec<u64>) -> Snapshot {
@@ -2589,7 +2591,7 @@ fn test_read_only_for_new_leader() {
         if compact_index != 0 {
             storage.wl().compact(compact_index).unwrap();
         }
-        let i = Interface::new(Raft::new(&cfg, storage));
+        let i = Interface::new(Raft::new(&cfg, storage, slog::Logger::root(slog::Discard, o!())));
         peers.push(Some(i));
     }
     let mut nt = Network::new(peers);
@@ -3723,7 +3725,7 @@ pub fn new_test_learner_raft(
 ) -> Interface {
     let mut cfg = new_test_config(id, peers, election, heartbeat);
     cfg.learners = learners;
-    Interface::new(Raft::new(&cfg, storage))
+    Interface::new(Raft::new(&cfg, storage, slog::Logger::root(slog::Discard, o!())))
 }
 
 // TestLearnerElectionTimeout verfies that the leader should not start election

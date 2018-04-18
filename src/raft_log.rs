@@ -28,6 +28,9 @@
 use std::cmp;
 
 use eraftpb::{Entry, Snapshot};
+use slog::{self, Logger, Drain};
+use slog_async;
+use slog_stdlog;
 
 use storage::Storage;
 use log_unstable::Unstable;
@@ -37,7 +40,6 @@ use util;
 pub use util::NO_LIMIT;
 
 /// Raft log implementation
-#[derive(Default)]
 pub struct RaftLog<T: Storage> {
     // storage contains all stable entries since the last snapshot.
     pub store: T,
@@ -56,6 +58,22 @@ pub struct RaftLog<T: Storage> {
     pub applied: u64,
 
     pub tag: String,
+
+    pub logger: Logger,
+}
+
+impl<T> Default for RaftLog<T>
+where T: Storage + Default {
+    fn default() -> Self {
+        RaftLog {
+            store: Default::default(),
+            unstable: Default::default(),
+            committed: Default::default(),
+            applied: Default::default(),
+            tag: Default::default(),
+            logger: slog::Logger::root(slog::Discard, o!()),
+        }
+    }
 }
 
 impl<T> ToString for RaftLog<T>
@@ -74,7 +92,8 @@ where
 }
 
 impl<T: Storage> RaftLog<T> {
-    pub fn new(storage: T, tag: String) -> RaftLog<T> {
+    pub fn new<L>(storage: T, tag: String, logger: L) -> RaftLog<T>
+    where L: Into<Option<Logger>> {
         let first_index = storage.first_index().unwrap();
         let last_index = storage.last_index().unwrap();
 
@@ -85,6 +104,11 @@ impl<T: Storage> RaftLog<T> {
             applied: first_index - 1,
             unstable: Unstable::new(last_index + 1, tag.clone()),
             tag: tag,
+            logger: logger.into().unwrap_or(
+                slog::Logger::root(
+                    slog_async::Async::new(slog_stdlog::StdLog.fuse()).build().fuse(), o!()
+                )
+            ),
         }
     }
 
@@ -158,11 +182,12 @@ impl<T: Storage> RaftLog<T> {
             if !self.match_term(e.get_index(), e.get_term()) {
                 if e.get_index() <= self.last_index() {
                     info!(
-                        "{} found conflict at index {}, [existing term:{}, conflicting term:{}]",
-                        self.tag,
-                        e.get_index(),
-                        self.term(e.get_index()).unwrap_or(0),
-                        e.get_term()
+                        self.logger,
+                        "{tag} found conflict at index {index}, [existing term: {existing_term}, conflicting term: {conflicting_term}]",
+                        tag = &self.tag,
+                        index = e.get_index(),
+                        existing_term = self.term(e.get_index()).unwrap_or(0),
+                        conflicting_term = e.get_term(),
                     );
                 }
                 return e.get_index();
@@ -415,11 +440,12 @@ impl<T: Storage> RaftLog<T> {
 
     pub fn restore(&mut self, snapshot: Snapshot) {
         info!(
-            "{} log [{}] starts to restore snapshot [index: {}, term: {}]",
-            self.tag,
-            self.to_string(),
-            snapshot.get_metadata().get_index(),
-            snapshot.get_metadata().get_term()
+            self.logger,
+            "{tag} log [{log}] starts to restore snapshot [index: {snapshot_index}, term: {snapshot_term}]",
+            tag = &self.tag,
+            log = self.to_string(),
+            snapshot_index = snapshot.get_metadata().get_index(),
+            snapshot_term = snapshot.get_metadata().get_term()
         );
         self.committed = snapshot.get_metadata().get_index();
         self.unstable.restore(snapshot);
@@ -435,9 +461,10 @@ mod test {
     use eraftpb;
     use errors::{Error, StorageError};
     use protobuf;
+    use slog;
 
     fn new_raft_log(s: MemStorage) -> RaftLog<MemStorage> {
-        RaftLog::new(s, String::from(""))
+        RaftLog::new(s, String::from(""), slog::Logger::root(slog::Discard, o!()))
     }
 
     fn new_entry(index: u64, term: u64) -> eraftpb::Entry {
