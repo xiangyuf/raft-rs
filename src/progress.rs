@@ -29,6 +29,7 @@ use errors::Error;
 use fxhash::FxHashMap;
 use std::cmp;
 use std::collections::hash_map::HashMap;
+use errors::Error;
 
 /// The state of the progress.
 #[derive(Debug, PartialEq, Clone, Copy)]
