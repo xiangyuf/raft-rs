@@ -1846,16 +1846,16 @@ impl<T: Storage> Raft<T> {
     /// This will add and remove nodes in order to reflect the desired state. This process is not
     /// immediate.
     pub fn set_nodes(&mut self, proposed: &ConfState) {
-        debug!("Determining joint configuration state");
 
         // Initial progress for new nodes.
         let mut initial = new_progress(self.raft_log.last_index() + 1, self.max_inflight);
         initial.matched = 0;
         initial.is_learner = false; // It needs to be marked later, un derive.
 
-        let new_prs = self.prs().derive_union_from_conf_state(&proposed, initial)
+        let union_prs = self.prs().derive_union_from_conf_state(&proposed, initial)
             .unwrap_or_else(|e| panic!("{}", e));
-        self.set_prs(new_prs);
+        debug!("Applying union peer configuration.");
+        self.set_prs(union_prs);
     }
 
     /// Adds a new node to the cluster.

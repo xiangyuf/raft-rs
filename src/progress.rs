@@ -185,6 +185,7 @@ impl ProgressSet {
             .keys().collect::<FxHashSet<_>>();
         let union_learners = proposed_learners.union(&current_learners)
             .cloned().collect::<FxHashSet<_>>();
+        debug!("Calculated union learners: {:?}", union_learners);
 
         let proposed_voters = proposed.get_nodes()
             .iter().collect::<FxHashSet<_>>();
@@ -192,6 +193,7 @@ impl ProgressSet {
             .keys().collect::<FxHashSet<_>>();
         let union_voters = proposed_voters.union(&current_voters)
             .cloned().collect::<FxHashSet<_>>();
+        debug!("Calculated union voters: {:?}", union_voters);
 
         let mut union_progress_set = ProgressSet::new(union_voters.len(), union_learners.len());
         // Voters first since it's illegal to demote a voter to a learner and we'd like to catch it.
