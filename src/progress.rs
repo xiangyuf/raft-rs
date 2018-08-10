@@ -26,10 +26,11 @@
 // limitations under the License.
 
 use errors::Error;
-use fxhash::FxHashMap;
+use fxhash::{FxHashMap, FxHashSet};
 use std::cmp;
 use std::collections::hash_map::HashMap;
 use errors::Error;
+use eraftpb::ConfState;
 
 /// The state of the progress.
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -161,6 +162,95 @@ impl ProgressSet {
         } else {
             Err(Error::NotExists(id, "learners"))
         }
+    }
+
+    /// Returns a unioned set of the current peer set, and the new peer set.
+    ///
+    /// * Learners:
+    ///     + n ∉ self.learners, n ∈ proposed.learners: Add as learner.
+    ///     + n ∈ self.voters, n ∈ proposed.learners: Error, invalid transition.
+    ///     + n ∈ self.learners, n ∉ proposed.learners: No action. (Will be removed later)
+    ///     + n ∈ self.learners, n ∈ proposed.voters: No action. (Will be promoted later)
+    ///  * Voters:
+    ///     + n ∉ self.voters, n ∈ proposed.voters: Add as voter.
+    ///     + n ∈ self.voters, n ∈ proposed.learners: Error, invalid transition.
+    ///     + n ∈ self.voters, n ∉ proposed.voters: No action. (Will be removed later)
+    ///     + Else: No action.
+    ///
+    /// The `initial_progress` is the progress that new nodes will be initialized with. Existing nodes will keep their progress.
+    pub fn derive_union_from_conf_state(&self, proposed: &ConfState, initial: Progress) -> Result<Self, Error> {
+        let proposed_learners = proposed.get_learners()
+            .iter().collect::<FxHashSet<_>>();
+        let current_learners = self.learners()
+            .keys().collect::<FxHashSet<_>>();
+        let union_learners = proposed_learners.union(&current_learners)
+            .cloned().collect::<FxHashSet<_>>();
+
+        let proposed_voters = proposed.get_nodes()
+            .iter().collect::<FxHashSet<_>>();
+        let current_voters = self.voters()
+            .keys().collect::<FxHashSet<_>>();
+        let union_voters = proposed_voters.union(&current_voters)
+            .cloned().collect::<FxHashSet<_>>();
+
+        let mut union_progress_set = ProgressSet::new(union_voters.len(), union_learners.len());
+        // Voters first since it's illegal to demote a voter to a learner and we'd like to catch it.
+        for id in union_voters {
+                let progress = self.voters()
+                    .get(&id).map(Clone::clone).unwrap_or(initial.clone());
+                union_progress_set.insert_voter(*id, progress)?;
+        }
+        for id in union_learners {
+                let progress = self.learners()
+                    .get(&id).map(Clone::clone).unwrap_or({
+                        let mut i = initial.clone();
+                        i.is_learner = true;
+                        i
+                    });
+                union_progress_set.insert_learner(*id, progress)?;
+        }
+        Ok(union_progress_set)
+    }
+
+    /// Returns a new set of peers based on the passed `ConfState`.
+    ///
+    /// * Learners:
+    ///     + n ∉ self.learners, n ∈ proposed.learners: Add as learner.
+    ///     + n ∈ self.learners, n ∈ proposed.voters: Promote to voter.
+    ///     + n ∈ self.learners, n ∉ proposed.learners: Remove learner.
+    ///     + Else: No action.
+    ///  * Voters:
+    ///     + n ∉ self.voters, n ∈ proposed.voters: Add as voter.
+    ///     + n ∈ self.voters, n ∉ proposed.voters: Remove voter.
+    ///     + n ∈ self.voters, n ∈ proposed.learners: Error, invalid transition.
+    ///     + Else: No action.
+    ///
+    /// The `initial_progress` is the progress that new nodes will be initialized with. Existing nodes will keep their progress.
+    pub fn derive_new_from_conf_state(&self, proposed: &ConfState, initial: Progress) -> Result<Self, Error> {
+        let mut new_progress_set = ProgressSet::new(proposed.get_nodes().len(), proposed.get_learners().len());
+        // The illegal transition of voter -> learner should have been rejected in the union state transition.
+        // Going from learner -> voter is intended.
+        for id in proposed.get_nodes() {
+                let progress = self.voters()
+                    .get(&id)
+                    .or(self.learners().get(&id))
+                    .map(|p| {
+                        let mut p = p.clone();
+                        p.is_learner = false;
+                        p
+                    }).unwrap_or(initial.clone());
+                new_progress_set.insert_voter(*id, progress)?;
+        }
+        for id in proposed.get_learners() {
+                let progress = self.learners()
+                    .get(&id).map(Clone::clone).unwrap_or({
+                        let mut i = initial.clone();
+                        i.is_learner = true;
+                        i
+                    });
+                new_progress_set.insert_learner(*id, progress)?;
+        }
+        Ok(new_progress_set)
     }
 }
 
