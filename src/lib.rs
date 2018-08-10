@@ -42,7 +42,10 @@ use raft::{
 let id = 1;
 let peers = vec![];
 let storage = MemStorage::default();
-let config = Config::new(id);
+let config = Config {
+    id,
+    ..Default::default()
+};
 // ... Make any configuration changes.
 // After, make sure it's valid!
 config.validate().unwrap();

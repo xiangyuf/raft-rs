@@ -308,10 +308,12 @@ impl<T: Storage> RawNode<T> {
             return cs;
         }
         let nid = cc.get_node_id();
+        #[allow(deprecated)] // TODO: Remove them entirely.
         match cc.get_change_type() {
             ConfChangeType::AddNode => self.raft.add_node(nid),
             ConfChangeType::AddLearnerNode => self.raft.add_learner(nid),
             ConfChangeType::RemoveNode => self.raft.remove_node(nid),
+            ConfChangeType::SetNodes => self.raft.set_nodes(cc.get_state()),
         }
         let mut cs = ConfState::new();
         cs.set_nodes(self.raft.prs().nodes());

@@ -27,8 +27,8 @@
 
 use std::cmp;
 
-use eraftpb::{Entry, EntryType, HardState, Message, MessageType, Snapshot};
-use fxhash::FxHashMap;
+use eraftpb::{Entry, EntryType, HardState, Message, MessageType, Snapshot, ConfState};
+use fxhash::{FxHashMap, FxHashSet};
 use protobuf::RepeatedField;
 use rand::{self, Rng};
 
@@ -1841,6 +1841,61 @@ impl<T: Storage> Raft<T> {
         self.prs().voters().contains_key(&self.id)
     }
 
+    /// Set the node group via joint consensus.
+    ///
+    /// This will add and remove nodes in order to reflect the desired state. This process is not
+    /// immediate.
+    pub fn set_nodes(&mut self, proposed: &ConfState) {
+        debug!("Determining joint configuration state");
+
+        // Initial progress for new nodes.
+        let mut initial = new_progress(self.raft_log.last_index() + 1, self.max_inflight);
+        initial.matched = 0;
+        initial.is_learner = false; // It needs to be marked later, un derive.
+
+        let new_prs = self.prs().derive_union_from_conf_state(&proposed, initial)
+            .unwrap_or_else(|e| panic!("{}", e));
+        self.set_prs(new_prs);
+    }
+
+    /// Adds a new node to the cluster.
+    #[deprecated(since = "0.4.0", note = "Please use `set_nodes` instead")]
+    pub fn add_node(&mut self, id: u64) {
+        let mut nodes = self.prs().voters().keys().cloned().collect::<Vec<u64>>();
+        let learners = self.prs().learners().keys().cloned().collect::<Vec<u64>>();
+        nodes.push(id);
+        let mut conf_state = ConfState::new();
+        conf_state.set_nodes(nodes);
+        conf_state.set_learners(learners);
+    }
+
+    /// Adds a learner node.
+    #[deprecated(since = "0.4.0", note = "Please use `set_nodes` instead")]
+    pub fn add_learner(&mut self, id: u64) {
+        let nodes = self.prs().voters().keys().cloned().collect::<Vec<u64>>();
+        let mut learners = self.prs().learners().keys().cloned().collect::<Vec<u64>>();
+        learners.push(id);
+        let mut conf_state = ConfState::new();
+        conf_state.set_nodes(nodes);
+        conf_state.set_learners(learners);
+
+        self.set_nodes(&conf_state)
+    }
+
+    /// Removes a node from the raft.
+    #[deprecated(since = "0.4.0", note = "Please use `set_nodes` instead")]
+    pub fn remove_node(&mut self, id: u64) {
+        let nodes = self.prs().voters().keys().cloned().filter(|&p| p != id).collect::<Vec<u64>>();
+        let learners = self.prs().learners().keys().cloned().filter(|&p| p != id).collect::<Vec<u64>>();
+        let mut conf_state = ConfState::new();
+        conf_state.set_nodes(nodes);
+        conf_state.set_learners(learners);
+
+        self.set_nodes(&conf_state)
+    }
+
+    #[deprecated(since = "0.4.0", note = "Please use `set_nodes` instead")]
+    #[allow(unused)]
     fn add_voter_or_learner(&mut self, id: u64, is_learner: bool) {
         if self.prs().voters().contains_key(&id) {
             if is_learner {
@@ -1873,18 +1928,8 @@ impl<T: Storage> Raft<T> {
         self.mut_prs().get_mut(id).unwrap().recent_active = true;
     }
 
-    /// Adds a new node to the cluster.
-    pub fn add_node(&mut self, id: u64) {
-        self.add_voter_or_learner(id, false);
-    }
 
-    /// Adds a learner node.
-    pub fn add_learner(&mut self, id: u64) {
-        self.add_voter_or_learner(id, true);
-    }
-
-    /// Removes a node from the raft.
-    pub fn remove_node(&mut self, id: u64) {
+    fn remove_node_old(&mut self, id: u64) {
         self.mut_prs().remove(id);
 
         // do not try to commit or abort transferring if there are no nodes in the cluster.
