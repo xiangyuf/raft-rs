@@ -17,6 +17,7 @@ protobuf = "2.0.4"
 quick-error = "1.2.2"
 rand = "0.5.4"
 fxhash = "0.2.1"
+env_logger = "*"
 
 [badges]
 travis-ci = { repository = "pingcap/raft-rs" }

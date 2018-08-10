@@ -179,21 +179,31 @@ impl ProgressSet {
     ///
     /// The `initial_progress` is the progress that new nodes will be initialized with. Existing nodes will keep their progress.
     pub fn derive_union_from_conf_state(&self, proposed: &ConfState, initial: Progress) -> Result<Self, Error> {
-        let proposed_learners = proposed.get_learners()
-            .iter().collect::<FxHashSet<_>>();
         let current_learners = self.learners()
             .keys().collect::<FxHashSet<_>>();
-        let union_learners = proposed_learners.union(&current_learners)
-            .cloned().collect::<FxHashSet<_>>();
-        debug!("Calculated union learners: {:?}", union_learners);
-
-        let proposed_voters = proposed.get_nodes()
-            .iter().collect::<FxHashSet<_>>();
         let current_voters = self.voters()
             .keys().collect::<FxHashSet<_>>();
+
+        let proposed_learners = proposed.get_learners()
+            .iter().collect::<FxHashSet<_>>();
+        let proposed_voters = proposed.get_nodes()
+            .iter().collect::<FxHashSet<_>>();
+
         let union_voters = proposed_voters.union(&current_voters)
             .cloned().collect::<FxHashSet<_>>();
+        let union_learners = proposed_learners.union(&current_learners)
+            .cloned().collect::<FxHashSet<_>>();
+
+        // Forbid demotion.
+        if let Some(&&id) = union_learners.intersection(&current_voters).next() {
+            Err(Error::Exists(id, "voters"))?;
+        }
+
+        // In the union state we don't promote, that's in `new`.
+        let union_voters = union_voters.difference(&union_learners)
+            .cloned().collect::<FxHashSet<_>>();
         debug!("Calculated union voters: {:?}", union_voters);
+        debug!("Calculated union learners: {:?}", union_learners);
 
         let mut union_progress_set = ProgressSet::new(union_voters.len(), union_learners.len());
         // Voters first since it's illegal to demote a voter to a learner and we'd like to catch it.
@@ -202,6 +212,7 @@ impl ProgressSet {
                     .get(&id).map(Clone::clone).unwrap_or(initial.clone());
                 union_progress_set.insert_voter(*id, progress)?;
         }
+        // Since we won't immediately promote the learners, we need to exclude them here.
         for id in union_learners {
                 let progress = self.learners()
                     .get(&id).map(Clone::clone).unwrap_or({
@@ -257,7 +268,7 @@ impl ProgressSet {
 }
 
 /// The progress of catching up from a restart.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct Progress {
     /// How much state is matched.
     pub matched: u64,
@@ -638,5 +649,348 @@ mod test {
         };
 
         assert_eq!(inflight, wantin);
+    }
+
+    use progress::{ProgressSet, Progress};
+    use eraftpb::ConfState;
+    use fxhash::FxHashSet;
+    use errors::Error;
+    use env_logger;
+
+    const INIT_LEARNERS: [u64; 2] = [5, 6];
+    const INIT_VOTERS: [u64; 5] = [0, 1, 2, 3, 4];
+
+    /// Initialize a 3 voter progress set with 1 learner.
+    fn init_progress_set() -> ProgressSet {
+        let mut set = ProgressSet::new(3, 1);
+        let mut init_progress = Progress::default();
+        init_progress.matched = 1;
+        init_progress.next_idx = 2;
+        let learner_progress = {
+            let mut temp = init_progress.clone();
+            temp.is_learner = true;
+            temp
+        };
+        INIT_VOTERS.iter().for_each(|&id| { set.insert_voter(id, init_progress.clone()).unwrap(); });
+        INIT_LEARNERS.iter().for_each(|&id| { set.insert_learner(id, learner_progress.clone()).unwrap(); });
+        set
+    }
+
+    // Tests both derive_union and derive_new to ensure they have the correct output.
+    fn test_derive(voters: FxHashSet<u64>, learners: FxHashSet<u64>) -> Result<(ProgressSet, ProgressSet), Error> {
+        let set = init_progress_set();
+        let progress = Progress::default();
+
+        let mut conf = ConfState::new();
+        conf.set_nodes(voters.iter().cloned().collect());
+        conf.set_learners(learners.iter().cloned().collect());
+
+        // First test derive_union
+        let union_set = set.derive_union_from_conf_state(&conf, progress.clone())?;
+
+        let expected_learners = learners.union(&INIT_LEARNERS.iter().cloned().collect())
+            .cloned().collect::<FxHashSet<_>>();
+        let expected_voters = voters.union(&INIT_VOTERS.iter().cloned().collect())
+            .cloned().collect::<FxHashSet<_>>()
+            .difference(&expected_learners).cloned().collect::<FxHashSet<_>>();
+
+        // Check that membership is correctly calculated.
+        assert_eq!(
+            union_set.voters().keys().cloned().collect::<FxHashSet<_>>(),
+            expected_voters,
+        );
+        assert_eq!(
+            union_set.learners().keys().cloned().collect::<FxHashSet<_>>(),
+            expected_learners,
+        );
+
+        // Check that progress is correctly copied.
+        // Capture the ID in case we need to output
+        let mut maybe_mismatch_id = None;
+        let nodes = set.nodes();
+        let maybe_mismatch = nodes.iter().find(|&&id| {
+            // if the node is removed don't check it.
+            match (set.get(id), union_set.get(id)) {
+                (_, None) | (None, _) => false,
+                (Some(set), Some(union_set)) if set != union_set => {
+                    maybe_mismatch_id = Some(id);
+                    true
+                },
+                _ => false
+            }
+        });
+
+        assert!(maybe_mismatch.is_none(), "progresses don't match: {:?} != {:?}",
+            maybe_mismatch.unwrap(),
+            union_set.get(maybe_mismatch_id.unwrap()).unwrap(),
+        );
+
+        // Now test derive_new
+        let new_set = union_set.derive_new_from_conf_state(&conf, progress)?;
+        assert_eq!(
+            new_set.voters().keys().cloned().collect::<FxHashSet<_>>(),
+            voters,
+        );
+        assert_eq!(
+            new_set.learners().keys().cloned().collect::<FxHashSet<_>>(),
+            learners,
+        );
+
+        // Check that progress is correctly copied.
+        // Capture the ID in case we need to output
+        let mut maybe_mismatch_id = None;
+        let nodes = set.nodes();
+        let maybe_mismatch = nodes.iter().find(|&&id| {
+            // if the node is removed don't check it.
+            match (set.get(id), union_set.get(id)) {
+                (_, None) | (None, _) => false,
+                (Some(set), Some(union_set)) if set != union_set => {
+                    maybe_mismatch_id = Some(id);
+                    true
+                },
+                _ => false
+            }
+        });
+
+        assert!(maybe_mismatch.is_none(), "progresses don't match: {:?} != {:?}",
+            maybe_mismatch.unwrap(),
+            new_set.get(maybe_mismatch_id.unwrap()).unwrap(),
+        );
+
+        Ok((union_set, new_set))
+    }
+
+    #[test]
+    fn test_derive_adding_a_learner() -> Result<(), Error> {
+        let _ = env_logger::try_init();
+        let new_id = 7;
+
+        let mut voters = FxHashSet::default();
+        (0..5).for_each(|id| { voters.insert(id); });
+        let mut learners = FxHashSet::default();
+        (5..=6).for_each(|id| { learners.insert(id); });
+        learners.insert(new_id);
+
+        let (union_set, new_set) = test_derive(voters, learners)?;
+        assert_eq!(union_set.get(new_id).unwrap().matched, 0);
+        assert_eq!(union_set.get(new_id).unwrap().next_idx, 0);
+        assert_eq!(union_set.learners().len(), 3);
+        assert_eq!(new_set.get(new_id).unwrap().matched, 0);
+        assert_eq!(new_set.get(new_id).unwrap().next_idx, 0);
+        assert_eq!(new_set.learners().len(), 3);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_derive_adding_some_learners() -> Result<(), Error> {
+        let _ = env_logger::try_init();
+        let new_ids = [7, 8];
+
+        let mut voters = FxHashSet::default();
+        (0..5).for_each(|id| { voters.insert(id); });
+        let mut learners = FxHashSet::default();
+        (5..=6).for_each(|id| { learners.insert(id); });
+        new_ids.iter().for_each(|&new_id| { learners.insert(new_id); });
+
+        let (union_set, new_set) = test_derive(voters, learners)?;
+        assert_eq!(union_set.learners().len(), 4);
+        new_ids.iter().for_each(|&new_id| {
+            assert_eq!(union_set.get(new_id).unwrap().matched, 0);
+            assert_eq!(union_set.get(new_id).unwrap().next_idx, 0);
+        });
+        assert_eq!(new_set.learners().len(), 4);
+        new_ids.iter().for_each(|&new_id| {
+            assert_eq!(new_set.get(new_id).unwrap().matched, 0);
+            assert_eq!(new_set.get(new_id).unwrap().next_idx, 0);
+        });
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_derive_removing_a_learner() -> Result<(), Error> {
+        let _ = env_logger::try_init();
+
+        let mut voters = FxHashSet::default();
+        (0..5).for_each(|id| { voters.insert(id); });
+        let mut learners = FxHashSet::default();
+        learners.insert(5);
+
+        let (union_set, new_set) = test_derive(voters, learners)?;
+        assert_eq!(union_set.learners().len(), 2); // None removed in union.
+        assert_eq!(new_set.learners().len(), 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_derive_removing_some_learners() -> Result<(), Error> {
+        let _ = env_logger::try_init();
+
+        let mut voters = FxHashSet::default();
+        (0..5).for_each(|id| { voters.insert(id); });
+        let learners = FxHashSet::default();
+
+        let (union_set, new_set) = test_derive(voters, learners)?;
+        assert_eq!(union_set.learners().len(), 2); // None removed in union.
+        assert_eq!(new_set.learners().len(), 2-2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_derive_adding_a_voter() -> Result<(), Error> {
+        let _ = env_logger::try_init();
+        let new_id = 7;
+
+        let mut voters = FxHashSet::default();
+        (0..5).for_each(|id| { voters.insert(id); });
+        voters.insert(new_id);
+        let mut learners = FxHashSet::default();
+        (5..=6).for_each(|id| { learners.insert(id); });
+
+        let (union_set, new_set) = test_derive(voters, learners)?;
+        assert_eq!(union_set.voters().len(), 5+1);
+        assert_eq!(union_set.get(new_id).unwrap().matched, 0);
+        assert_eq!(union_set.get(new_id).unwrap().next_idx, 0);
+        assert_eq!(new_set.voters().len(), 5+1);
+        assert_eq!(new_set.get(new_id).unwrap().matched, 0);
+        assert_eq!(new_set.get(new_id).unwrap().next_idx, 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_derive_adding_some_voters() -> Result<(), Error> {
+        let _ = env_logger::try_init();
+        let new_ids = [7, 8];
+
+        let mut voters = FxHashSet::default();
+        (0..5).for_each(|id| { voters.insert(id); });
+        new_ids.iter().for_each(|&new_id| { voters.insert(new_id); });
+        let mut learners = FxHashSet::default();
+        (5..=6).for_each(|id| { learners.insert(id); });
+
+        let (union_set, new_set) = test_derive(voters, learners)?;
+        new_ids.iter().for_each(|&new_id| {
+            assert_eq!(union_set.get(new_id).unwrap().matched, 0);
+            assert_eq!(union_set.get(new_id).unwrap().next_idx, 0);
+        });
+        assert_eq!(union_set.voters().len(), 5+2);
+        new_ids.iter().for_each(|&new_id| {
+            assert_eq!(new_set.get(new_id).unwrap().matched, 0);
+            assert_eq!(new_set.get(new_id).unwrap().next_idx, 0);
+        });
+        assert_eq!(new_set.voters().len(), 5+2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_derive_removing_a_voter() -> Result<(), Error> {
+        let _ = env_logger::try_init();
+
+        let mut voters = FxHashSet::default();
+        (0..(5-1)).for_each(|id| { voters.insert(id); });
+        let mut learners = FxHashSet::default();
+        (5..=6).for_each(|id| { learners.insert(id); });
+
+        let (union_set, new_set) = test_derive(voters, learners)?;
+        // During union voters should not be removed.
+        assert_eq!(union_set.voters().len(), 5);
+        assert_eq!(new_set.voters().len(), 5-1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_derive_removing_some_voters() -> Result<(), Error> {
+        let _ = env_logger::try_init();
+
+        let mut voters = FxHashSet::default();
+        (0..(5-2)).for_each(|id| { voters.insert(id); });
+        let mut learners = FxHashSet::default();
+        (5..=6).for_each(|id| { learners.insert(id); });
+
+        let (union_set, new_set) = test_derive(voters, learners)?;
+        // During union voters should not be removed.
+        assert_eq!(union_set.voters().len(), 5);
+        assert_eq!(new_set.voters().len(), 5-2);
+
+        Ok(())
+    }
+
+    // TODO: Specifying learners explicitly and how they behave is undefined by Raft.
+    //
+    // In C_old the node is a non-voting learner. In C_new it is a voting member.
+    // So what is it in C_union?
+    #[test]
+    fn test_derive_mixed_changes() -> Result<(), Error> {
+        let _ = env_logger::try_init();
+
+        let mut voters = FxHashSet::default();
+        [0, 1, 2, 6, 9].iter().for_each(|&id| { voters.insert(id); });
+        let mut learners = FxHashSet::default();
+        [7, 8].iter().for_each(|&id| { learners.insert(id); });
+
+        let (union_set, new_set) = test_derive(voters, learners)?;
+        // 5 original, 1 added, (nothing removed yet)
+        assert_eq!(union_set.voters().len(), 5 + 1);
+        // 2 original, 1 to-be promoted, 1 added.
+        assert_eq!(union_set.learners().len(), 4);
+        // 5 original, 1 added, 1 promoted, 2 removed.
+        assert_eq!(new_set.voters().len(), 5+2-2);
+        // 2 original, 1 promoted, 1 added.
+        assert_eq!(new_set.learners().len(), 2+1-1);
+
+        Ok(())
+    }
+
+    // TODO: Specifying learners explicitly and how they behave is undefined by Raft.
+    //
+    // In C_old the node is a non-voting learner. In C_new it is a voting member.
+    // So what is it in C_union?
+    #[test]
+    fn test_derive_promoting_a_learner() -> Result<(), Error> {
+        let _ = env_logger::try_init();
+        let set = init_progress_set();
+        let progress = Progress::default();
+
+        let mut voters = FxHashSet::default();
+        (0..=6).for_each(|id| { voters.insert(id); });
+        let learners = FxHashSet::default();
+
+        let mut conf = ConfState::new();
+        conf.set_nodes(voters.iter().cloned().collect());
+        conf.set_learners(learners.iter().cloned().collect());
+
+        let union_set = set.derive_union_from_conf_state(&conf, progress)?;
+        assert_eq!(union_set.voters().len(), 5); // Should be no changes.
+        assert_eq!(union_set.learners().len(), 2);
+
+        Ok(())
+    }
+
+    // We expect this to error, you can't demote a voter.
+    #[test]
+    fn test_derive_demoting_a_voter() -> Result<(), Error> {
+        let _ = env_logger::try_init();
+        let set = init_progress_set();
+        let progress = Progress::default();
+
+        let mut voters = FxHashSet::default();
+        (0..5).for_each(|id| { voters.insert(id); });
+        let mut learners = FxHashSet::default();
+        (4..=5).for_each(|id| { learners.insert(id); });
+
+        let mut conf = ConfState::new();
+        conf.set_nodes(voters.iter().cloned().collect());
+        conf.set_learners(learners.iter().cloned().collect());
+
+        let union_set = set.derive_union_from_conf_state(&conf, progress);
+        assert!(union_set.is_err());
+
+        Ok(())
     }
 }
