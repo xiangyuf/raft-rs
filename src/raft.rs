@@ -136,6 +136,9 @@ pub struct Raft<T: Storage> {
     /// value.
     pub pending_conf_index: u64,
 
+    // TODO Joint Consensus: Maybe this isn't needed. Can we use `pending_conf_index`?
+    in_joint_configuration: bool,
+
     /// The queue of read-only requests.
     pub read_only: ReadOnly,
 
@@ -774,6 +777,7 @@ impl<T: Storage> Raft<T> {
         info!("{} became leader at term {}", self.tag, self.term);
     }
 
+    // TODO Joint Consensus: Ensure it detects being in the union state and `SetNodes`.
     fn num_pending_conf(&self, ents: &[Entry]) -> usize {
         ents.into_iter()
             .filter(|e| e.get_entry_type() == EntryType::EntryConfChange)
@@ -790,6 +794,7 @@ impl<T: Storage> Raft<T> {
             (MessageType::MsgRequestVote, self.term)
         };
         let self_id = self.id;
+        // TODO Joint Consensus: Validate this handles calculating seperate majorities.
         if self.quorum() == self.poll(self_id, vote_resp_msg_type(vote_msg), true) {
             // We won the election after voting for ourselves (which must mean that
             // this is a single-node cluster). Advance to the next state.
@@ -840,6 +845,7 @@ impl<T: Storage> Raft<T> {
                 self.tag, t, id, self.term
             )
         }
+        // TODO Joint Consensus: Need to calculate seperate majorities during leader elections.
         self.votes.entry(id).or_insert(v);
         self.votes.values().filter(|x| **x).count()
     }
@@ -1341,6 +1347,7 @@ impl<T: Storage> Raft<T> {
                 let pr = prs.get_mut(m.get_from()).unwrap();
                 self.handle_transfer_leader(m, pr);
             }
+            // TODO Joint Consensus: Append new configuration if in C_union to go to C_New
             _ => {}
         }
         self.set_prs(prs);
@@ -1387,6 +1394,7 @@ impl<T: Storage> Raft<T> {
 
                 for (i, e) in m.mut_entries().iter_mut().enumerate() {
                     if e.get_entry_type() == EntryType::EntryConfChange {
+                        // TODO Joint Consensus: This may be dangerous. Validate it works still.
                         if self.has_pending_conf() {
                             info!(
                                 "propose conf {:?} ignored since pending unapplied \
